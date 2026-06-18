@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -19,6 +21,11 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Printf("Installed to %s.\n", installer.InstallPath())
+		return
+	}
+
+	if len(os.Args) > 2 && os.Args[1] == "--notui" {
+		runNoTUI(os.Args[2])
 		return
 	}
 
@@ -53,6 +60,60 @@ func main() {
 	program := tea.NewProgram(model, tea.WithAltScreen())
 
 	if _, err := program.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func runNoTUI(file string) {
+	absPath, err := filepath.Abs(file)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error resolving path: %v\n", err)
+		os.Exit(1)
+	}
+
+	info, err := os.Stat(absPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	if info.IsDir() {
+		fmt.Fprintf(os.Stderr, "Error: %s is a directory\n", file)
+		os.Exit(1)
+	}
+
+	ext := filepath.Ext(absPath)
+	name := filepath.Base(absPath)
+	s := executor.Script{Name: name, Path: absPath}
+
+	var cmd *exec.Cmd
+
+	switch ext {
+	case ".c", ".cc", ".cpp", ".cxx", ".go", ".rs":
+		compileCmd := executor.CompileCommand(s)
+		fmt.Printf("Compiling %s...\n", name)
+		out, cerr := compileCmd.CombinedOutput()
+		if len(out) > 0 {
+			os.Stdout.Write(out)
+		}
+		if cerr != nil {
+			fmt.Fprintf(os.Stderr, "Compile failed: %v\n", cerr)
+			os.Exit(1)
+		}
+		defer executor.Cleanup()
+		cmd = executor.RunCompiledCmd()
+	default:
+		cmd, err = executor.Command(s)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+	}
+
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}

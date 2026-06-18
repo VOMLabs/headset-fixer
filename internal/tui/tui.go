@@ -19,6 +19,7 @@ type outputMsg string
 type scriptDone struct{ err error }
 type orResult string
 type orError struct{ err error }
+type compileSkipped struct{}
 
 var (
 	titleStyle = lipgloss.NewStyle().
@@ -30,10 +31,6 @@ var (
 	cursorStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#FBBF24")).
 			Bold(true)
-
-	selectedStyle = lipgloss.NewStyle().
-			Background(lipgloss.Color("#1E3A5F")).
-			Foreground(lipgloss.Color("#FFFFFF"))
 
 	runningStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#22C55E")).
@@ -184,9 +181,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.running = false
 		m.runErr = msg.err
 		m.cancel = nil
+		executor.Cleanup()
 		if m.orEnabled && m.apiKey != "" && m.output.Len() > 0 {
 			return m, processWithOR(m.output.String(), m.apiKey)
 		}
+		return m, nil
+
+	case compileSkipped:
 		return m, nil
 
 	case orResult:
@@ -215,6 +216,96 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func runScript(ctx context.Context, s executor.Script) tea.Cmd {
+	if s.Type == executor.TypeCompilable {
+		return runCompilable(ctx, s)
+	}
+	return runDirect(ctx, s)
+}
+
+func runCompilable(ctx context.Context, s executor.Script) tea.Cmd {
+	compileCmd := executor.CompileCommand(s)
+	compileCmd = exec.CommandContext(ctx, compileCmd.Path, compileCmd.Args[1:]...)
+
+	stdout, err := compileCmd.StdoutPipe()
+	if err != nil {
+		return func() tea.Msg { return scriptDone{err: err} }
+	}
+	stderr, err := compileCmd.StderrPipe()
+	if err != nil {
+		return func() tea.Msg { return scriptDone{err: err} }
+	}
+
+	if err := compileCmd.Start(); err != nil {
+		return func() tea.Msg { return scriptDone{err: err} }
+	}
+
+	reader := io.MultiReader(stdout, stderr)
+	scanner := bufio.NewScanner(reader)
+	compileDone := make(chan error, 1)
+	go func() { compileDone <- compileCmd.Wait() }()
+
+	type phase int
+	const (
+		phaseCompile phase = iota
+		phaseRun
+		phaseDone
+	)
+
+	p := phaseCompile
+	var runScanner *bufio.Scanner
+	var runDone chan error
+
+	return func() tea.Msg {
+		switch p {
+		case phaseCompile:
+			if scanner.Scan() {
+				return outputMsg(scanner.Text())
+			}
+			if err := <-compileDone; err != nil {
+				p = phaseDone
+				return scriptDone{err: fmt.Errorf("compile failed: %w", err)}
+			}
+			p = phaseRun
+			return outputMsg("--- Compilation OK, running ---")
+
+		case phaseRun:
+			if runScanner == nil {
+				runCmd := executor.RunCompiledCmd()
+				runCmd = exec.CommandContext(ctx, runCmd.Path, runCmd.Args[1:]...)
+				rStdout, err := runCmd.StdoutPipe()
+				if err != nil {
+					p = phaseDone
+					return scriptDone{err: err}
+				}
+				rStderr, err := runCmd.StderrPipe()
+				if err != nil {
+					p = phaseDone
+					return scriptDone{err: err}
+				}
+				if err := runCmd.Start(); err != nil {
+					p = phaseDone
+					return scriptDone{err: err}
+				}
+				rReader := io.MultiReader(rStdout, rStderr)
+				runScanner = bufio.NewScanner(rReader)
+				runDone = make(chan error, 1)
+				go func() { runDone <- runCmd.Wait() }()
+			}
+			if runScanner.Scan() {
+				return outputMsg(runScanner.Text())
+			}
+			p = phaseDone
+			err := <-runDone
+			return scriptDone{err: err}
+
+		case phaseDone:
+			return nil
+		}
+		return nil
+	}
+}
+
+func runDirect(ctx context.Context, s executor.Script) tea.Cmd {
 	cmd, err := executor.Command(s)
 	if err != nil {
 		return func() tea.Msg {
@@ -320,9 +411,13 @@ func (m Model) renderList(width, height int) string {
 
 	displayed := m.scripts[start:end]
 	for i, s := range displayed {
-		line := "  " + s.Name
+		label := s.Name
+		if s.Type == executor.TypeCompilable {
+			label += " [C]"
+		}
+		line := "  " + label
 		if start+i == m.cursor {
-			line = "▸ " + s.Name
+			line = "▸ " + label
 			if m.running && s.Name == m.currentScript {
 				line = cursorStyle.Render(line) + " " + runningStyle.Render("●")
 			} else {

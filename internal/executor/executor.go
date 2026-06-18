@@ -1,66 +1,110 @@
 package executor
 
 import (
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strings"
 )
+
+type ScriptType int
+
+const (
+	TypeScript ScriptType = iota
+	TypeCompilable
+)
+
+func (t ScriptType) String() string {
+	switch t {
+	case TypeScript:
+		return "script"
+	case TypeCompilable:
+		return "compilable"
+	default:
+		return "unknown"
+	}
+}
 
 type Script struct {
 	Name string
 	Path string
+	Type ScriptType
 }
 
 func FindScripts(dir string) ([]Script, error) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, err
-	}
-
 	var scripts []Script
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
+
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
 		}
-		name := e.Name()
+
+		if d.IsDir() {
+			name := d.Name()
+			if name != "." && strings.HasPrefix(name, ".") {
+				return filepath.SkipDir
+			}
+			if name == "node_modules" || name == "vendor" || name == ".git" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		name := d.Name()
 		if name == "scripty" || name == "scripty.exe" {
-			continue
+			return nil
 		}
+
 		ext := filepath.Ext(name)
+		relPath, _ := filepath.Rel(dir, path)
 
 		switch ext {
 		case ".sh", ".bash", ".zsh", ".fish",
 			".py", ".pyw",
-			".go",
 			".js", ".mjs", ".cjs",
 			".rb",
 			".pl", ".pm",
 			".lua",
 			".ts", ".tsx":
-			scripts = append(scripts, Script{Name: name, Path: filepath.Join(dir, name)})
-			continue
+			scripts = append(scripts, Script{Name: relPath, Path: path, Type: TypeScript})
+			return nil
+		case ".go":
+			scripts = append(scripts, Script{Name: relPath, Path: path, Type: TypeCompilable})
+			return nil
+		case ".c", ".cc", ".cpp", ".cxx":
+			scripts = append(scripts, Script{Name: relPath, Path: path, Type: TypeCompilable})
+			return nil
+		case ".rs":
+			scripts = append(scripts, Script{Name: relPath, Path: path, Type: TypeCompilable})
+			return nil
 		}
 
-		info, err := e.Info()
+		info, err := d.Info()
 		if err != nil {
-			continue
+			return nil
 		}
 		if info.Mode()&0o111 != 0 {
-			scripts = append(scripts, Script{Name: name, Path: filepath.Join(dir, name)})
-			continue
+			scripts = append(scripts, Script{Name: relPath, Path: path, Type: TypeScript})
+			return nil
 		}
 
-		f, err := os.Open(filepath.Join(dir, name))
+		f, err := os.Open(path)
 		if err != nil {
-			continue
+			return nil
 		}
 		var shebang [2]byte
 		f.Read(shebang[:])
 		f.Close()
 		if shebang[0] == '#' && shebang[1] == '!' {
-			scripts = append(scripts, Script{Name: name, Path: filepath.Join(dir, name)})
+			scripts = append(scripts, Script{Name: relPath, Path: path, Type: TypeScript})
 		}
+		return nil
+	})
+
+	if err != nil {
+		return nil, err
 	}
 
 	sort.Slice(scripts, func(i, j int) bool {
@@ -82,8 +126,6 @@ func Command(s Script) (*exec.Cmd, error) {
 		return exec.Command("python3", s.Path), nil
 	case ".js", ".mjs", ".cjs":
 		return exec.Command("node", s.Path), nil
-	case ".go":
-		return exec.Command("go", "run", s.Path), nil
 	case ".rb":
 		return exec.Command("ruby", s.Path), nil
 	case ".pl", ".pm":
@@ -95,4 +137,28 @@ func Command(s Script) (*exec.Cmd, error) {
 	default:
 		return exec.Command(s.Path), nil
 	}
+}
+
+func CompileCommand(s Script) *exec.Cmd {
+	ext := filepath.Ext(s.Name)
+	switch ext {
+	case ".go":
+		return exec.Command("go", "build", "-o", "/tmp/scripty_out", s.Path)
+	case ".c":
+		return exec.Command("gcc", "-o", "/tmp/scripty_out", s.Path)
+	case ".cc", ".cpp", ".cxx":
+		return exec.Command("g++", "-o", "/tmp/scripty_out", s.Path)
+	case ".rs":
+		return exec.Command("rustc", "-o", "/tmp/scripty_out", s.Path)
+	default:
+		return nil
+	}
+}
+
+func RunCompiledCmd() *exec.Cmd {
+	return exec.Command("/tmp/scripty_out")
+}
+
+func Cleanup() {
+	os.Remove("/tmp/scripty_out")
 }
