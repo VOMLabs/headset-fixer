@@ -24,6 +24,9 @@ func FindScripts(dir string) ([]Script, error) {
 			continue
 		}
 		name := e.Name()
+		if name == "scripty" || name == "scripty.exe" {
+			continue
+		}
 		ext := filepath.Ext(name)
 
 		switch ext {
