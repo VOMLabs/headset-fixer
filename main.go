@@ -148,7 +148,9 @@ func (m model) buildTasks() []task {
 			name: "Unload echo-cancel module",
 			fn: func() (int, string) {
 				if id := findEchoMod(s); id >= 0 {
-					exec.Command("pactl", "unload-module", strconv.Itoa(id)).Run()
+					if err := exec.Command("pactl", "unload-module", strconv.Itoa(id)).Run(); err != nil {
+						return resFail, fmt.Sprintf("Unload failed: %v", err)
+					}
 					restart = true
 					return resWarn, "Unloaded"
 				}
@@ -159,7 +161,9 @@ func (m model) buildTasks() []task {
 			name: "Disable echo-cancel config",
 			fn: func() (int, string) {
 				if _, err := os.Stat(echoCfg); err == nil {
-					os.Rename(echoCfg, echoDis)
+					if err := os.Rename(echoCfg, echoDis); err != nil {
+						return resFail, fmt.Sprintf("Rename failed: %v", err)
+					}
 					restart = true
 					return resWarn, "Disabled"
 				}
@@ -170,7 +174,9 @@ func (m model) buildTasks() []task {
 			name: "Fix default source",
 			fn: func() (int, string) {
 				if d := getDefSrc(); d != s {
-					exec.Command("pactl", "set-default-source", s).Run()
+					if err := exec.Command("pactl", "set-default-source", s).Run(); err != nil {
+						return resFail, fmt.Sprintf("Failed: %v", err)
+					}
 					restart = true
 					return resWarn, "Fixed"
 				}
@@ -180,14 +186,18 @@ func (m model) buildTasks() []task {
 		{
 			name: "Set volume to 100%",
 			fn: func() (int, string) {
-				exec.Command("pactl", "set-source-volume", s, "65536").Run()
+				if err := exec.Command("pactl", "set-source-volume", s, "65536").Run(); err != nil {
+					return resFail, fmt.Sprintf("Failed: %v", err)
+				}
 				return resOK, "100%"
 			},
 		},
 		{
 			name: "Unmute mic",
 			fn: func() (int, string) {
-				exec.Command("pactl", "set-source-mute", s, "0").Run()
+				if err := exec.Command("pactl", "set-source-mute", s, "0").Run(); err != nil {
+					return resFail, fmt.Sprintf("Failed: %v", err)
+				}
 				return resOK, "Unmuted"
 			},
 		},
@@ -211,7 +221,9 @@ func (m model) buildTasks() []task {
 				if !restart {
 					return resOK, "Not needed"
 				}
-				exec.Command("systemctl", "--user", "restart", "pipewire-pulse").Run()
+				if err := exec.Command("systemctl", "--user", "restart", "pipewire-pulse").Run(); err != nil {
+					return resFail, fmt.Sprintf("Restart failed: %v", err)
+				}
 				time.Sleep(2 * time.Second)
 				return resOK, "Restarted"
 			},
@@ -224,7 +236,9 @@ func (m model) buildTasks() []task {
 				}
 				exec.Command("pkill", "discord").Run()
 				time.Sleep(1 * time.Second)
-				exec.Command("discord").Start()
+				if err := exec.Command("discord").Start(); err != nil {
+					return resWarn, fmt.Sprintf("Launch failed: %v", err)
+				}
 				return resOK, "Restarted"
 			},
 		},
@@ -236,7 +250,9 @@ func (m model) buildTasks() []task {
 				}
 				exec.Command("pkill", "vesktop").Run()
 				time.Sleep(1 * time.Second)
-				exec.Command("vesktop").Start()
+				if err := exec.Command("vesktop").Start(); err != nil {
+					return resWarn, fmt.Sprintf("Launch failed: %v", err)
+				}
 				return resOK, "Restarted"
 			},
 		},
@@ -442,9 +458,16 @@ func renderTask(t task, spinView string) string {
 
 func main() {
 	p := tea.NewProgram(initialModel())
-	if _, err := p.Run(); err != nil {
+	m, err := p.Run()
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
+	}
+	final := m.(model)
+	for _, t := range final.tasks {
+		if t.state == stepFail {
+			os.Exit(1)
+		}
 	}
 }
 
